@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>커스텀 이미지 피젯 스피너</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0b1e15; /* 아주 진한 딥 그린 배경 */
+            color: #f3e5ab;
+            font-family: 'Apple SD Gothic Neo', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            height: 100vh;
+            overflow: hidden;
+        }
+        header {
+            text-align: center;
+            padding: 15px;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.2rem;
+            color: #d4af37; /* 메탈릭 골드 */
+            letter-spacing: 1px;
+        }
+        p {
+            margin: 5px 0 0;
+            font-size: 0.8rem;
+            color: #8da399;
+        }
+        /* 스피너 영역 */
+        #spinner-container {
+            position: relative;
+            width: 320px;
+            height: 320px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            touch-action: none;
+            cursor: grab;
+        }
+        #spinner-container:active {
+            cursor: grabbing;
+        }
+        canvas {
+            display: block;
+        }
+        /* 컨트롤 패널 (이미지 업로드 및 대시보드) */
+        .control-panel {
+            width: 100%;
+            max-width: 400px;
+            background: rgba(11, 30, 21, 0.95);
+            border-top: 1px solid #1f4031;
+            padding: 15px 20px 25px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .upload-box {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .upload-box label {
+            font-size: 0.85rem;
+            color: #d4af37;
+            font-weight: bold;
+        }
+        .upload-box input[type="file"] {
+            background: #143627;
+            border: 1px dashed #2e694f;
+            padding: 8px;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.8rem;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            text-align: center;
+        }
+        .stat-card {
+            background: #123022;
+            border: 1px solid #1f4031;
+            padding: 8px;
+            border-radius: 8px;
+        }
+        .stat-label {
+            font-size: 0.7rem;
+            color: #8da399;
+            margin-bottom: 2px;
+        }
+        .stat-value {
+            font-size: 1rem;
+            font-weight: bold;
+            color: #f3e5ab;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>금빛 딥그린 피젯 스피너</h1>
+        <p>화면을 손가락으로 밀어 회전시키고 이미지를 넣어보세요!</p>
+    </header>
+
+    <div id="spinner-container">
+        <canvas id="spinnerCanvas" width="320" height="320"></canvas>
+    </div>
+
+    <div class="control-panel">
+        <div class="upload-box">
+            <label for="imageUpload">날개 끝 커스텀 이미지 업로드:</label>
+            <input type="file" id="imageUpload" accept="image/*">
+        </div>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">현재 RPM</div>
+                <div class="stat-value" id="rpmVal">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">최고 RPM</div>
+                <div class="stat-value" id="maxRpmVal">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">회전수</div>
+                <div class="stat-value" id="turnsVal">0</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('spinnerCanvas');
+        const ctx = canvas.getContext('2d');
+        const container = document.getElementById('spinner-container');
+
+        // 스피너 물리 상태 변수
+        let angle = 0;          // 현재 각도
+        let angularVelocity = 0;// 회전 속도 (각속도)
+        let friction = 0.988;   // 마찰력 (자연스럽게 감속)
+        let maxRpmRecord = 0;
+        let totalRotations = 0;
+
+        // 인터랙션 제어 변수
+        let isDragging = false;
+        let lastTouchAngle = 0;
+        let lastTouchTime = 0;
+
+        // 커스텀 이미지 객체 배열 (3개의 날개용)
+        let customImages = [null, null, null];
+
+        // Web Audio API 사운드 초기화
+        let audioCtx = null;
+        let oscillator = null;
+        let gainNode = null;
+        let isSoundPlaying = false;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        function startBearingSound() {
+            if (isSoundPlaying || !audioCtx) return;
+            try {
+                oscillator = audioCtx.createOscillator();
+                gainNode = audioCtx.createGain();
+
+                // 베어링의 고주파 금속 마찰음 시뮬레이션 (핑크/화이트 노이즈 느낌용 다중 조합 대신 심플한 톱니파+필터 활용)
+                oscillator.type = 'sawtooth';
+                oscillator.frequency.setValueAtTime(120, audioCtx.currentTime);
+
+                // 볼륨 노드 연결
+                gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.start();
+                isSoundPlaying = true;
+            } catch (e) {
+                console.log("Audio play blocked", e);
+            }
+        }
+
+        function updateBearingSound() {
+            if (!isSoundPlaying || !gainNode || !oscillator) return;
+            let currentRpm = Math.abs(angularVelocity) * 150;
+            
+            if (currentRpm < 5) {
+                stopBearingSound();
+                return;
+            }
+
+            // 속도에 맞춰 소리 주파수와 볼륨 조절
+            let freq = 100 + Math.min(currentRpm * 0.8, 600);
+            let vol = Math.min((currentRpm / 1500) * 0.12, 0.12);
+
+            oscillator.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.05);
+            gainNode.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+        }
+
+        function stopBearingSound() {
+            if (!isSoundPlaying) return;
+            try {
+                if (gainNode && audioCtx) {
+                    gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+                }
+                setTimeout(() => {
+                    if (oscillator && isSoundPlaying) {
+                        oscillator.stop();
+                        oscillator.disconnect();
+                        isSoundPlaying = false;
+                    }
+                }, 100);
+            } catch (e) {
+                isSoundPlaying = false;
+            }
+        }
+
+        // 이미지 업로드 처리
+        document.getElementById('imageUpload').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    const img = new Image();
+                    img.onload = function() {
+                        // 3개의 날개 패드에 동일하게 적용 (원하면 각각 다르게 지정도 가능)
+                        customImages[0] = img;
+                        customImages[1] = img;
+                        customImages[2] = img;
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        // 중심점 기준 각도 계산 함수
+        function getAngle(clientX, clientY) {
+            const rect = canvas.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            return Math.atan2(clientY - centerY, clientX - centerX);
+        }
+
+        // 터치 및 마우스 이벤트 바인딩
+        container.addEventListener('pointerdown', (e) => {
+            initAudio();
+            startBearingSound();
+            isDragging = true;
+            lastTouchAngle = getAngle(e.clientX, e.clientY);
+            lastTouchTime = performance.now();
+            angularVelocity = 0; // 잡았을 때 일시 정지
+        });
+
+        window.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            const currentAngle = getAngle(e.clientX, e.clientY);
+            const currentTime = performance.now();
+            
+            let deltaAngle = currentAngle - lastTouchAngle;
+            // 각도 왜곡 방지 (경계면 통과 시 보정)
+            if (deltaAngle > Math.PI) deltaAngle -= Math.PI * 2;
+            if (deltaAngle < -Math.PI) deltaAngle += Math.PI * 2;
+
+            const deltaTime = currentTime - lastTouchTime;
+            if (deltaTime > 0) {
+                angularVelocity = deltaAngle / (deltaTime / 16); // 속도 계산
+            }
+
+            angle += deltaAngle;
+            lastTouchAngle = currentAngle;
+            lastTouchTime = currentTime;
+        });
+
+        window.addEventListener('pointerup', () => {
+            isDragging = false;
+        });
+
+        // 스피너 그리기 함수 (딥 그린 & 메탈릭 골드 디자인 + 커스텀 이미지 렌더링)
+        function drawSpinner() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.save();
+            ctx.translate(canvas.width / 2, canvas.height / 2);
+            ctx.rotate(angle);
+
+            const armLength = 85; // 중심에서 날개까지의 거리
+            const padRadius = 38; // 날개 원의 크기
+
+            // 1. 3개의 날개 몸체 연결 브릿지 (딥 그린 메탈)
+            for (let i = 0; i < 3; i++) {
+                ctx.save();
+                ctx.rotate((i * 2 * Math.PI) / 3);
+                
+                // 골드 테두리 메인 암
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(0, -armLength);
+                ctx.lineWidth = 28;
+                ctx.strokeStyle = '#143627';
+                ctx.lineCap = 'round';
+                ctx.stroke();
+
+                ctx.lineWidth = 4;
+                ctx.strokeStyle = '#d4af37';
+                ctx.stroke();
+
+                ctx.restore();
+            }
+
+            // 2. 3개의 날개 끝 패드 (이미지가 있으면 이미지 삽입, 없으면 기본 골드/그린 패드)
+            for (let i = 0; i < 3; i++) {
+                ctx.save();
+                ctx.rotate((i * 2 * Math.PI) / 3);
+                ctx.translate(0, -armLength);
+
+                // 패드 배경 테두리
+                ctx.beginPath();
+                ctx.arc(0, 0, padRadius, 0, 2 * Math.PI);
+                ctx.fillStyle = '#0f291d';
+                ctx.fill();
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = '#d4af37';
+                ctx.stroke();
+
+                // 사용자가 업로드한 이미지가 있는 경우 그려넣기
+                if (customImages[i]) {
+                    ctx.save();
+                    // 스피너가 돌 때 이미지도 같이 직립해서 돌도록 역회전 처리 (선택사항이나 원형 클립 적용)
+                    ctx.beginPath();
+                    ctx.arc(0, 0, padRadius - 4, 0, 2 * Math.PI);
+                    ctx.clip();
+
+                    // 이미지를 패드 크기에 맞춰 정중앙에 그리기
+                    ctx.drawImage(customImages[i], -padRadius, -padRadius, padRadius * 2, padRadius * 2);
+                    ctx.restore();
+                } else {
+                    // 기본 장식 패턴 (이미지 없을 때)
+                    ctx.beginPath();
+                    ctx.arc(0, 0, padRadius - 10, 0, 2 * Math.PI);
+                    ctx.fillStyle = '#1b4d36';
+                    ctx.fill();
+
+                    // 작은 골드 도트
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 8, 0, 2 * Math.PI);
+                    ctx.fillStyle = '#d4af37';
+                    ctx.fill();
+                }
+
+                ctx.restore();
+            }
+
+            // 3. 중앙 베어링 (캡 부분)
+            ctx.beginPath();
+            ctx.arc(0, 0, 28, 0, 2 * Math.PI);
+            ctx.fillStyle = '#1a3a2b';
+            ctx.fill();
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = '#d4af37';
+            ctx.stroke();
+
+            // 중앙 스틸 볼베어링 표현
+            ctx.beginPath();
+            ctx.arc(0, 0, 10, 0, 2 * Math.PI);
+            ctx.fillStyle = '#08140f';
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#d4af37';
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        // 애니메이션 및 물리 루프
+        function animate() {
+            if (!isDragging) {
+                // 관성에 의한 회전 및 감속
+                angularVelocity *= friction;
+                angle += angularVelocity;
+
+                if (Math.abs(angularVelocity) < 0.0005) {
+                    angularVelocity = 0;
+                    stopBearingSound();
+                } else {
+                    updateBearingSound();
+                }
+            }
+
+            // 통계 계산
+            let currentRpm = Math.round(Math.abs(angularVelocity) * 150);
+            if (currentRpm > maxRpmRecord) {
+                maxRpmRecord = currentRpm;
+            }
+            totalRotations = Math.abs(angle / (2 * Math.PI)).toFixed(1);
+
+            // UI 업데이트
+            document.getElementById('rpmVal').innerText = currentRpm;
+            document.getElementById('maxRpmVal').innerText = maxRpmRecord;
+            document.getElementById('turnsVal').innerText = totalRotations;
+
+            drawSpinner();
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
